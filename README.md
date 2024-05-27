@@ -4,6 +4,8 @@
 
 A cli utility to discover **mDNS** services on your network. Built with [Ratatui](https://ratatui.rs/) and [mDNS-SD](https://github.com/keepsimple1/mdns-sd).
 
+![Example](./static/mdns.gif)
+
 ## Installation
 
 ### Cargo
