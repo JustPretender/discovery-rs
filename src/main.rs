@@ -1,19 +1,20 @@
 #![allow(clippy::enum_glob_use, clippy::wildcard_imports)]
 
-use clap::Parser;
-use clap::ValueHint;
-use clap_derive::Parser;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::File;
 use std::ops::Deref;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use std::time::Duration;
 use std::{error::Error, io::stdout};
 
+use clap::{Parser, ValueHint};
+use clap_derive::Parser;
 use color_eyre::config::HookBuilder;
 use crossterm::event::poll;
 use crossterm::{
@@ -63,12 +64,12 @@ struct App {
     current_tab: Tab,
 }
 
-const K_MAIN_QUERRY: &'static str = "_services._dns-sd._udp.local.";
+const K_SERVICE_TYPE_ENUMERATION: &'static str = "_services._dns-sd._udp.local.";
 
 fn main() -> Result<(), Box<dyn Error>> {
     let opts = CliOpts::parse();
 
-    // setup logging to the file, if RUST_LOG is set
+    // setup logging to a file
     if let Some(ref path) = opts.log_to {
         let log_file = Box::new(File::create(path)?);
         env_logger::Builder::from_default_env()
@@ -85,7 +86,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         opts.query
             .as_ref()
             .map(|q| q.as_str())
-            .unwrap_or(K_MAIN_QUERRY),
+            .unwrap_or(K_SERVICE_TYPE_ENUMERATION),
         opts.interface.unwrap_or(IfKind::All),
     )?;
     app.run(terminal)?;
@@ -135,7 +136,7 @@ impl App {
         let instances = Arc::new(Mutex::new(HashMap::new()));
         let (stop_tx, stop_rx) = flume::bounded(1);
 
-        log::debug!("Started mDNS browsing on {interface:?}");
+        log::info!("Started mDNS browsing on {interface:#?}");
         {
             let mdns = mdns.clone();
             let services = services.clone();
@@ -163,14 +164,14 @@ impl App {
                                             .lock()
                                             .expect("Failed to acquire the service daemon lock")
                                             .browse(&full_name)
-                                            .expect("Failed to start browsing");
+                                            .expect("Failed to start mDNS browsing");
 
                                         let mut receivers = receivers.borrow_mut();
                                         receivers.push(receiver);
                                     }
                                 }
                                 ServiceEvent::ServiceResolved(info) => {
-                                    log::debug!("Resolved {info:?}");
+                                    log::debug!("Resolved {info:#?}");
                                     if let Some(resolved) = instances
                                         .lock()
                                         .expect("Failed to acquire the service lock")
@@ -178,7 +179,7 @@ impl App {
                                     {
                                         resolved.push(Info { info });
                                     }
-                                },
+                                }
                                 // TODO: handle service removals
                                 _ => {}
                             }

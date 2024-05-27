@@ -4,6 +4,24 @@ use std::fmt::Display;
 
 use crate::colors::*;
 
+/// Custom [`List`] entry trait
+///
+/// Implementing this trait for a type will make it possible
+/// for the type to be rendered as a line in the [`List`].
+pub trait ListEntry {
+    fn entry(&self) -> Line;
+}
+
+impl<D: Display> ListEntry for D {
+    fn entry(&self) -> Line {
+        Line::styled(format!("{}", self), TEXT_COLOR)
+    }
+}
+
+/// Custom [`List`] widget.
+///
+/// Keeps track of the list elements and implements [`Widget`] so
+/// that the list can be rendered as part of the TUI.
 #[derive(Debug)]
 pub struct ListWidget<Item> {
     items: Vec<Item>,
@@ -12,7 +30,7 @@ pub struct ListWidget<Item> {
 
 impl<Item> ListWidget<Item>
 where
-    Item: Display + PartialEq,
+    Item: ListEntry + PartialEq,
 {
     pub fn new() -> ListWidget<Item> {
         Self {
@@ -55,7 +73,6 @@ where
         if !self.items.is_empty() {
             let index = match self.state.get_mut().selected() {
                 Some(i) => {
-                    // Banking on the list not being longer than 2.4B items...
                     (i as isize + delta).rem_euclid(self.items.len() as isize) as usize
                 }
                 // Nothing selected yet, pick the first item
@@ -68,7 +85,7 @@ where
 
 impl<Item> Widget for &ListWidget<Item>
 where
-    Item: Display,
+    Item: ListEntry,
 {
     fn render(self, area: Rect, buf: &mut Buffer)
     where
@@ -84,8 +101,7 @@ where
             .iter()
             .enumerate()
             .map(|(index, item)| {
-                let line = Line::styled(format!("{}", item), TEXT_COLOR);
-                ListItem::new(line).bg(if (index % 2) == 0 {
+                ListItem::new(item.entry()).bg(if (index % 2) == 0 {
                     NORMAL_ROW_COLOR
                 } else {
                     ALT_ROW_COLOR

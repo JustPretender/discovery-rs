@@ -1,8 +1,12 @@
-use std::fmt::{Display, Formatter};
+use crate::colors::*;
+use crate::list::ListEntry;
 use mdns_sd::ServiceInfo;
 use ratatui::{prelude::*, widgets::*};
-use crate::colors::*;
 
+/// [`ServiceInfo`] wrapper.
+///
+/// Implements traits, necessary for the [`ServiceInfo`] to be
+/// rendered either as a [`Widget`] or simply as an entry in the [`List`]
 #[derive(Debug)]
 pub struct Info {
     pub info: ServiceInfo,
@@ -14,9 +18,9 @@ impl PartialEq for Info {
     }
 }
 
-impl Display for Info {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.info.get_hostname())
+impl ListEntry for Info {
+    fn entry(&self) -> Line {
+        Line::styled(format!("{}", self.info.get_hostname()), TEXT_COLOR)
     }
 }
 
