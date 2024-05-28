@@ -22,6 +22,10 @@ impl ListEntry for Info {
     fn entry(&self) -> Line {
         Line::styled(format!("{}", self.info.get_hostname()), TEXT_COLOR)
     }
+
+    fn id(&self) -> String {
+        self.info.get_fullname().to_string()
+    }
 }
 
 impl Widget for &Info {

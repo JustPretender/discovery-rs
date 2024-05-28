@@ -150,7 +150,7 @@ impl App {
                         if let Ok(event) = event {
                             match event {
                                 ServiceEvent::ServiceFound(service_type, full_name) => {
-                                    log::debug!("Found {service_type}:{full_name}");
+                                    log::info!("Service found {full_name}");
                                     if service_type == query {
                                         services
                                             .lock()
@@ -171,7 +171,7 @@ impl App {
                                     }
                                 }
                                 ServiceEvent::ServiceResolved(info) => {
-                                    log::debug!("Resolved {info:#?}");
+                                    log::info!("Service resolved {info:#?}");
                                     if let Some(resolved) = instances
                                         .lock()
                                         .expect("Failed to acquire the service lock")
@@ -180,8 +180,32 @@ impl App {
                                         resolved.push(Info { info });
                                     }
                                 }
-                                // TODO: handle service removals
-                                _ => {}
+                                ServiceEvent::ServiceRemoved(service_type, full_name) => {
+                                    log::info!("Service removed: {full_name}");
+
+                                    if service_type == query {
+                                        services
+                                            .lock()
+                                            .expect("Failed to acquire the service lock")
+                                            .remove(&full_name);
+                                        instances
+                                            .lock()
+                                            .expect("Failed to acquire the instances lock")
+                                            .remove(&full_name);
+                                    } else if let Some(resolved) = instances
+                                        .lock()
+                                        .expect("Failed to acquire the instances lock")
+                                        .get_mut(&service_type)
+                                    {
+                                        resolved.remove(&full_name);
+                                    }
+                                },
+                                ServiceEvent::SearchStarted(service) => {
+                                    log::debug!("Search Started for {service}");
+                                },
+                                ServiceEvent::SearchStopped(service) => {
+                                    log::debug!("Search Stopped for {service}");
+                                },
                             }
                         }
                     }

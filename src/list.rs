@@ -10,11 +10,16 @@ use crate::colors::*;
 /// for the type to be rendered as a line in the [`List`].
 pub trait ListEntry {
     fn entry(&self) -> Line;
+    fn id(&self) -> String;
 }
 
 impl<D: Display> ListEntry for D {
     fn entry(&self) -> Line {
         Line::styled(format!("{}", self), TEXT_COLOR)
+    }
+
+    fn id(&self) -> String {
+        format!("{}", self)
     }
 }
 
@@ -48,6 +53,12 @@ where
         }
     }
 
+    pub fn remove(&mut self, id: &String) {
+        if let Some((index, _)) = self.items.iter().enumerate().find(|(_, el)| el.id() == *id) {
+            self.items.remove(index);
+        }
+    }
+
     pub fn next(&mut self) {
         self.select_delta(1);
     }
@@ -72,9 +83,7 @@ where
         // If there's nothing in the list, we can't do anything
         if !self.items.is_empty() {
             let index = match self.state.get_mut().selected() {
-                Some(i) => {
-                    (i as isize + delta).rem_euclid(self.items.len() as isize) as usize
-                }
+                Some(i) => (i as isize + delta).rem_euclid(self.items.len() as isize) as usize,
                 // Nothing selected yet, pick the first item
                 None => 0,
             };
