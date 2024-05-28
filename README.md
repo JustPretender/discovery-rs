@@ -1,6 +1,6 @@
 # discovery-rs
 
-[![Build](https://github.com/keepsimple1/mdns-sd/actions/workflows/build.yml/badge.svg)](https://github.com/JustPretender/discovery-rs/actions)[![Rust version: 1.63+](https://img.shields.io/badge/rust%20version-1.63+-orange)](https://blog.rust-lang.org/2022/08/11/Rust-1.63.0.html)
+[![Build](https://github.com/keepsimple1/mdns-sd/actions/workflows/build.yml/badge.svg)](https://github.com/JustPretender/discovery-rs/actions)[![Rust version: 1.74+](https://img.shields.io/badge/rust%20version-1.74-orange)](https://blog.rust-lang.org/2023/11/16/Rust-1.74.0.html)
 
 A cli utility to discover **mDNS** services on your network. Built with [Ratatui](https://ratatui.rs/) and [mDNS-SD](https://github.com/keepsimple1/mdns-sd).
 
