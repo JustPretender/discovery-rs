@@ -24,7 +24,7 @@ impl ListEntry for Info {
     }
 
     fn id(&self) -> String {
-        self.info.get_fullname().to_string()
+        self.info.get_hostname().to_string()
     }
 }
 

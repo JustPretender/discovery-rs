@@ -16,9 +16,9 @@ use std::{error::Error, io::stdout};
 use clap::{Parser, ValueHint};
 use clap_derive::Parser;
 use color_eyre::config::HookBuilder;
-use crossterm::event::poll;
+use crossterm::event::KeyModifiers;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, poll, Event, KeyCode, KeyEventKind},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
@@ -33,6 +33,8 @@ use crate::list::ListWidget;
 mod colors;
 mod info;
 mod list;
+mod search;
+mod utils;
 
 #[derive(Parser, Debug, Default)]
 #[command(author, version, about, long_about = None)]
@@ -199,13 +201,13 @@ impl App {
                                     {
                                         resolved.remove(&full_name);
                                     }
-                                },
+                                }
                                 ServiceEvent::SearchStarted(service) => {
                                     log::debug!("Search Started for {service}");
-                                },
+                                }
                                 ServiceEvent::SearchStopped(service) => {
                                     log::debug!("Search Stopped for {service}");
-                                },
+                                }
                             }
                         }
                     }
@@ -244,15 +246,32 @@ impl App {
             if poll(Duration::from_millis(250))? {
                 if let Event::Key(key) = event::read()? {
                     if key.kind == KeyEventKind::Press {
-                        use KeyCode::*;
                         match key.code {
-                            Char('q') | Esc => return Ok(()),
-                            Char('j') | Down => self.next(),
-                            Char('k') | Up => self.previous(),
-                            Tab => self.switch_tab(),
-                            Char('g') => self.go_top(),
-                            Char('G') => self.go_bottom(),
-                            _ => {}
+                            KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                return Ok(())
+                            }
+                            KeyCode::Left => self.current_tab = Tab::Services,
+                            KeyCode::Right => self.current_tab = Tab::Instances,
+                            _ => {
+                                let mut services =
+                                    self.services.lock().expect("Failed to acquire lock");
+                                let mut instances =
+                                    self.instances.lock().expect("Failed to acquire lock");
+
+                                match self.current_tab {
+                                    Tab::Services => {
+                                        services.process_key_event(&key);
+                                    }
+                                    Tab::Instances => {
+                                        if let Some(selected) = services
+                                            .selected()
+                                            .and_then(|service| instances.get_mut(service))
+                                        {
+                                            selected.process_key_event(&key);
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -261,7 +280,9 @@ impl App {
     }
 
     fn draw(&mut self, terminal: &mut Terminal<impl Backend>) -> anyhow::Result<()> {
-        terminal.draw(|f| f.render_widget(self, f.size()))?;
+        terminal.draw(|f| {
+            f.render_widget(self as &mut App, f.size());
+        })?;
         Ok(())
     }
 
@@ -276,7 +297,7 @@ impl App {
 
     fn render_block<W: Widget>(
         &self,
-        name: &str,
+        title: &str,
         widget: W,
         area: Rect,
         buf: &mut Buffer,
@@ -290,132 +311,13 @@ impl App {
                 Style::default()
             })
             .title_alignment(Alignment::Center)
-            .title(name)
+            .title(title)
             .title_style(Style::new().bold())
             .fg(TEXT_COLOR)
             .bg(HEADER_BG);
         let inner_area = block.inner(area);
         block.render(area, buf);
         widget.render(inner_area, buf);
-    }
-
-    fn next(&mut self) {
-        match self.current_tab {
-            Tab::Services => {
-                self.services
-                    .lock()
-                    .expect("Failed to acquire the lock")
-                    .next();
-            }
-            Tab::Instances => {
-                if let Some(selected) = self
-                    .services
-                    .lock()
-                    .expect("Failed to acquire the lock")
-                    .selected()
-                {
-                    if let Some(instances) = self
-                        .instances
-                        .lock()
-                        .expect("Failed to acquire the lock")
-                        .get_mut(selected)
-                    {
-                        instances.next();
-                    }
-                }
-            }
-        }
-    }
-
-    fn previous(&mut self) {
-        match self.current_tab {
-            Tab::Services => {
-                self.services
-                    .lock()
-                    .expect("Failed to acquire the lock")
-                    .prev();
-            }
-            Tab::Instances => {
-                if let Some(selected) = self
-                    .services
-                    .lock()
-                    .expect("Failed to acquire the lock")
-                    .selected()
-                {
-                    if let Some(instances) = self
-                        .instances
-                        .lock()
-                        .expect("Failed to acquire the lock")
-                        .get_mut(selected)
-                    {
-                        instances.prev();
-                    }
-                }
-            }
-        }
-    }
-
-    fn go_top(&mut self) {
-        match self.current_tab {
-            Tab::Services => {
-                self.services
-                    .lock()
-                    .expect("Failed to acquire the lock")
-                    .top();
-            }
-            Tab::Instances => {
-                if let Some(selected) = self
-                    .services
-                    .lock()
-                    .expect("Failed to acquire the lock")
-                    .selected()
-                {
-                    if let Some(instances) = self
-                        .instances
-                        .lock()
-                        .expect("Failed to acquire the lock")
-                        .get_mut(selected)
-                    {
-                        instances.top();
-                    }
-                }
-            }
-        }
-    }
-
-    fn go_bottom(&mut self) {
-        match self.current_tab {
-            Tab::Services => {
-                self.services
-                    .lock()
-                    .expect("Failed to acquire the lock")
-                    .bottom();
-            }
-            Tab::Instances => {
-                if let Some(selected) = self
-                    .services
-                    .lock()
-                    .expect("Failed to acquire the lock")
-                    .selected()
-                {
-                    if let Some(instances) = self
-                        .instances
-                        .lock()
-                        .expect("Failed to acquire the lock")
-                        .get_mut(selected)
-                    {
-                        instances.bottom();
-                    }
-                }
-            }
-        }
-    }
-
-    fn switch_tab(&mut self) {
-        self.current_tab = match self.current_tab {
-            Tab::Services => Tab::Instances,
-            Tab::Instances => Tab::Services,
-        }
     }
 }
 
@@ -442,12 +344,18 @@ impl Widget for &mut App {
             Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]);
         let [service_area, instances_area] = list_layout.areas(list_area);
 
+        let services = self.services.lock().expect("Failed to acquire the lock");
+
         self.render_block(
-            "Services",
-            self.services
-                .lock()
-                .expect("Failed to acquire the lock")
-                .deref(),
+            &format!(
+                "Services{}",
+                if let Some(regex) = services.search_regex() {
+                    format!("(/{}/)", regex.to_string())
+                } else {
+                    "".to_string()
+                }
+            ),
+            services.deref(),
             service_area,
             buf,
             if let Tab::Services = self.current_tab {
@@ -456,21 +364,19 @@ impl Widget for &mut App {
                 false
             },
         );
-        if let Some(selected) = self
-            .services
-            .lock()
-            .expect("Failed to acquire the lock")
-            .selected()
-        {
-            if let Some(instances) = self
-                .instances
-                .lock()
-                .expect("Failed to acquire the lock")
-                .get(selected)
-            {
+        if let Some(selected) = services.selected() {
+            let instances = self.instances.lock().expect("Failed to acquire the lock");
+            if let Some(resolved_instances) = instances.get(selected) {
                 self.render_block(
-                    "Resolved instances",
-                    instances,
+                    &format!(
+                        "Resolved instances{}",
+                        if let Some(regex) = resolved_instances.search_regex() {
+                            format!("(/{}/)", regex.to_string())
+                        } else {
+                            "".to_string()
+                        }
+                    ),
+                    resolved_instances,
                     instances_area,
                     buf,
                     if let Tab::Instances = self.current_tab {
@@ -479,14 +385,30 @@ impl Widget for &mut App {
                         false
                     },
                 );
-                if let Some(selected) = instances.selected() {
+                if let Some(selected) = resolved_instances.selected() {
                     self.render_block("Detailed info", selected, info_area, buf, false);
                 }
             }
+        } else {
+            self.render_block(
+                "Resolved instances",
+                Paragraph::default(),
+                instances_area,
+                buf,
+                if let Tab::Instances = self.current_tab {
+                    true
+                } else {
+                    false
+                },
+            );
+            self.render_block("Detailed info", Paragraph::default(), info_area, buf, false);
         }
 
-        Paragraph::new("\nUse ↓↑ to move, TAB to switch panes, g/G to go top/bottom.")
-            .centered()
-            .render(footer_area, buf);
+        Paragraph::new(vec![
+            ListWidget::<String>::controls(),
+            Line::from("←→ to switch panes, C-q to exit."),
+        ])
+        .centered()
+        .render(footer_area, buf);
     }
 }
