@@ -1,5 +1,6 @@
 use crate::colors::{HEADER_BG, NORMAL_ROW_COLOR, SEARCH_STYLE_BORDER, TEXT_COLOR};
-use crossterm::event::KeyCode;
+use crate::widget::DiscoveryWidget;
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::prelude::{Alignment, Constraint, Layout, Line, Stylize, Widget};
@@ -22,11 +23,21 @@ impl Search {
             Ok(None)
         }
     }
+}
 
-    pub fn update(&mut self, key: &KeyCode) {
-        match (self.search.as_mut(), key) {
+impl DiscoveryWidget for Search {
+    fn title(&self) -> String {
+        "Search".to_string()
+    }
+
+    fn controls(&self) -> String {
+        "Use ↵ to apply. Esc to exit".to_string()
+    }
+
+    fn process_key_event(&mut self, key_event: &KeyEvent) {
+        match (self.search.as_mut(), key_event.code) {
             (Some(regex), KeyCode::Char(c)) => {
-                regex.push(*c);
+                regex.push(c);
             }
             (Some(regex), KeyCode::Backspace) => {
                 regex.pop();
@@ -46,10 +57,8 @@ impl Search {
             self.search = None;
         }
     }
-}
 
-impl Widget for &Search {
-    fn render(self, area: Rect, buf: &mut Buffer)
+    fn render(&self, area: Rect, buf: &mut Buffer, _selected: bool)
     where
         Self: Sized,
     {
@@ -57,7 +66,7 @@ impl Widget for &Search {
             .borders(Borders::ALL)
             .border_style(Style::new().fg(SEARCH_STYLE_BORDER).bold())
             .title_alignment(Alignment::Center)
-            .title("Search")
+            .title(self.title())
             .title_style(Style::new().bold())
             .fg(TEXT_COLOR)
             .bg(HEADER_BG);
@@ -79,7 +88,7 @@ impl Widget for &Search {
 
         Widget::render(input, search_area, buf);
 
-        Paragraph::new("\nUse ↵ to apply. Esc to exit")
+        Paragraph::new(self.controls())
             .centered()
             .wrap(Wrap::default())
             .render(footer_area, buf);

@@ -1,19 +1,14 @@
-#![allow(clippy::enum_glob_use, clippy::wildcard_imports)]
-
+use anyhow::Context;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::File;
-use std::ops::Deref;
-use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
-};
+use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::Duration;
 use std::{error::Error, io::stdout};
 
-use clap::{Parser, ValueHint};
+use clap::Parser;
 use clap_derive::Parser;
 use color_eyre::config::HookBuilder;
 use crossterm::event::KeyModifiers;
@@ -24,17 +19,23 @@ use crossterm::{
 };
 use flume::{Selector, Sender};
 use mdns_sd::{IfKind, ServiceDaemon, ServiceEvent};
+use parking_lot::Mutex;
 use ratatui::{prelude::*, widgets::*};
+use tracing::{instrument, Level};
+use tracing_appender::non_blocking;
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::EnvFilter;
 
-use crate::colors::*;
 use crate::info::Info;
 use crate::list::ListWidget;
+use crate::widget::DiscoveryWidget;
 
 mod colors;
 mod info;
 mod list;
 mod search;
 mod utils;
+mod widget;
 
 #[derive(Parser, Debug, Default)]
 #[command(author, version, about, long_about = None)]
@@ -43,44 +44,28 @@ struct CliOpts {
     #[arg(long)]
     /// mDNS service query, default: _services._dns-sd._udp.local.
     query: Option<String>,
-    #[arg(long, value_hint = ValueHint::FilePath)]
-    /// Enable debug logging to a file
-    log_to: Option<PathBuf>,
     #[arg(long)]
     /// Interface to perform discovery on, default: All
     interface: Option<IfKind>,
-}
-
-#[derive(Debug, Default)]
-enum Tab {
-    #[default]
-    Services,
-    Instances,
-}
-
-struct App {
-    mdns: Arc<Mutex<ServiceDaemon>>,
-    stop: Sender<()>,
-    services: Arc<Mutex<ListWidget<String>>>,
-    instances: Arc<Mutex<HashMap<String, ListWidget<Info>>>>,
-    current_tab: Tab,
+    #[arg(long, action)]
+    /// Enable tracing and debug logging
+    tracing: bool,
 }
 
 const K_SERVICE_TYPE_ENUMERATION: &'static str = "_services._dns-sd._udp.local.";
+const K_REFRESH_RATE: u8 = 24;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let opts = CliOpts::parse();
 
-    // setup logging to a file
-    if let Some(ref path) = opts.log_to {
-        let log_file = Box::new(File::create(path)?);
-        env_logger::Builder::from_default_env()
-            .target(env_logger::Target::Pipe(log_file))
-            .init();
+    init_error_hooks()?;
+
+    // setup tracing and keep its guard
+    let mut _tracing_guard = None;
+    if opts.tracing {
+        _tracing_guard = Some(init_tracing()?);
     }
 
-    // setup terminal
-    init_error_hooks()?;
     let terminal = init_terminal()?;
 
     // create app and run it
@@ -128,148 +113,184 @@ fn restore_terminal() -> color_eyre::Result<()> {
     Ok(())
 }
 
+/// Initialize the tracing subscriber to log to a file
+///
+/// This function initializes the tracing subscriber to log to a file named `tracing.log` in the
+/// current directory. The function returns a [`WorkerGuard`] that must be kept alive for the
+/// duration of the program to ensure that logs are flushed to the file on shutdown. The logs are
+/// written in a non-blocking fashion to ensure that the logs do not block the main thread.
+fn init_tracing() -> anyhow::Result<WorkerGuard> {
+    let file = File::create("tracing.log").context("Failed to create tracing.log")?;
+    let (non_blocking, guard) = non_blocking(file);
+
+    // By default, the subscriber is configured to log all events with a level of `DEBUG` or higher,
+    // but this can be changed by setting the `RUST_LOG` environment variable.
+    let env_filter = EnvFilter::builder()
+        .with_default_directive(Level::INFO.into())
+        .from_env_lossy();
+
+    tracing_subscriber::fmt()
+        .with_writer(non_blocking)
+        .with_env_filter(env_filter)
+        .init();
+    Ok(guard)
+}
+
+#[derive(Debug, Default)]
+enum Tab {
+    #[default]
+    Services,
+    Instances,
+}
+
+#[derive(Debug, Default)]
+enum State {
+    #[default]
+    Running,
+    Exit,
+}
+
+struct App {
+    stop: Sender<()>,
+    services: Arc<Mutex<ListWidget<String>>>,
+    instances: Arc<Mutex<HashMap<String, ListWidget<Info>>>>,
+    current_tab: Tab,
+    worker_handle: Option<JoinHandle<anyhow::Result<()>>>,
+}
+
 impl App {
-    fn new<T: AsRef<str>>(query: T, interface: IfKind) -> anyhow::Result<Self> {
+    #[instrument]
+    fn new<T: AsRef<str> + std::fmt::Debug>(query: T, interface: IfKind) -> anyhow::Result<Self> {
         let mdns = ServiceDaemon::new()?;
-        mdns.enable_interface(interface.clone())?;
-        let base = mdns.browse(query.as_ref())?;
         let mdns = Arc::new(Mutex::new(mdns));
-        let services = Arc::new(Mutex::new(ListWidget::new()));
+        let services = Arc::new(Mutex::new(
+            ListWidget::default().name("Services".to_string()),
+        ));
         let instances = Arc::new(Mutex::new(HashMap::new()));
         let (stop_tx, stop_rx) = flume::bounded(1);
 
-        log::info!("Started mDNS browsing on {interface:#?}");
-        {
+        let worker = {
             let mdns = mdns.clone();
             let services = services.clone();
             let instances = instances.clone();
             let query = query.as_ref().to_string();
             std::thread::spawn(move || -> anyhow::Result<()> {
+                let _span = tracing::span!(Level::TRACE, "mDNS worker").entered();
+
+                let base = {
+                    let mdns = mdns.lock();
+                    mdns.enable_interface(interface.clone())?;
+                    mdns.browse(query.as_str())?
+                };
+
+                tracing::info!("Started the mDNS browsing");
+
                 let receivers = Rc::new(RefCell::new(vec![base]));
                 let event_handler = {
                     let receivers = receivers.clone();
-                    move |event| {
+                    let mdns = mdns.clone();
+                    move |event| -> anyhow::Result<()> {
                         if let Ok(event) = event {
                             match event {
                                 ServiceEvent::ServiceFound(service_type, full_name) => {
-                                    log::info!("Service found {full_name}");
+                                    tracing::debug!("New service found: {full_name}");
                                     if service_type == query {
-                                        services
-                                            .lock()
-                                            .expect("Failed to acquire the service lock")
-                                            .push(full_name.clone());
-                                        instances
-                                            .lock()
-                                            .expect("Failed to acquire the instances lock")
-                                            .insert(full_name.clone(), ListWidget::new());
-                                        let receiver = mdns
-                                            .lock()
-                                            .expect("Failed to acquire the service daemon lock")
-                                            .browse(&full_name)
-                                            .expect("Failed to start mDNS browsing");
-
+                                        services.lock().push(full_name.clone());
+                                        instances.lock().insert(
+                                            full_name.clone(),
+                                            ListWidget::default().name(full_name.clone()),
+                                        );
+                                        let receiver = mdns.lock().browse(&full_name)?;
                                         let mut receivers = receivers.borrow_mut();
                                         receivers.push(receiver);
                                     }
                                 }
                                 ServiceEvent::ServiceResolved(info) => {
-                                    log::info!("Service resolved {info:#?}");
-                                    if let Some(resolved) = instances
-                                        .lock()
-                                        .expect("Failed to acquire the service lock")
-                                        .get_mut(info.get_type())
+                                    tracing::debug!("Service resolved: {info:#?}");
+                                    if let Some(resolved) =
+                                        instances.lock().get_mut(info.get_type())
                                     {
                                         resolved.push(Info { info });
                                     }
                                 }
                                 ServiceEvent::ServiceRemoved(service_type, full_name) => {
-                                    log::info!("Service removed: {full_name}");
-
+                                    tracing::debug!("Service removed: {full_name}");
                                     if service_type == query {
-                                        services
-                                            .lock()
-                                            .expect("Failed to acquire the service lock")
-                                            .remove(&full_name);
-                                        instances
-                                            .lock()
-                                            .expect("Failed to acquire the instances lock")
-                                            .remove(&full_name);
-                                    } else if let Some(resolved) = instances
-                                        .lock()
-                                        .expect("Failed to acquire the instances lock")
-                                        .get_mut(&service_type)
+                                        services.lock().remove(&full_name);
+                                        instances.lock().remove(&full_name);
+                                    } else if let Some(resolved) =
+                                        instances.lock().get_mut(&service_type)
                                     {
                                         resolved.remove(&full_name);
                                     }
                                 }
                                 ServiceEvent::SearchStarted(service) => {
-                                    log::debug!("Search Started for {service}");
+                                    tracing::trace!("Search Started for {service}");
                                 }
                                 ServiceEvent::SearchStopped(service) => {
-                                    log::debug!("Search Stopped for {service}");
+                                    tracing::trace!("Search Stopped for {service}");
                                 }
                             }
                         }
+
+                        Ok(())
                     }
                 };
 
-                let stop = AtomicBool::new(false);
-                while !stop.load(Ordering::Acquire) {
+                let mut stop = false;
+                while !stop {
                     let receivers = receivers.borrow().clone();
                     let mut selector = Selector::new();
-                    for r in receivers.iter() {
-                        selector = selector.recv(r, &event_handler);
+                    for receiver in receivers.iter() {
+                        selector = selector.recv(receiver, &event_handler);
                     }
                     selector = selector.recv(&stop_rx, |_| {
-                        stop.store(true, Ordering::SeqCst);
+                        stop = true;
+                        Ok(())
                     });
-                    selector.wait();
+                    selector.wait()?;
                 }
 
+                mdns.lock().shutdown()?;
+
+                tracing::info!("Stopped the mDNS browsing");
+
                 Ok(())
-            });
-        }
+            })
+        };
 
         Ok(Self {
-            mdns,
             services,
             instances,
             stop: stop_tx,
             current_tab: Tab::Services,
+            worker_handle: Some(worker),
         })
     }
 
-    fn run(&mut self, mut terminal: Terminal<impl Backend>) -> anyhow::Result<()> {
-        loop {
-            self.draw(&mut terminal)?;
+    fn handle_event(&mut self, event: Event) -> anyhow::Result<State> {
+        if let Event::Key(key) = event {
+            if key.kind == KeyEventKind::Press {
+                match key.code {
+                    KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        return Ok(State::Exit)
+                    }
+                    KeyCode::Left => self.current_tab = Tab::Services,
+                    KeyCode::Right => self.current_tab = Tab::Instances,
+                    _ => {
+                        let mut services = self.services.lock();
+                        let mut instances = self.instances.lock();
 
-            if poll(Duration::from_millis(250))? {
-                if let Event::Key(key) = event::read()? {
-                    if key.kind == KeyEventKind::Press {
-                        match key.code {
-                            KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                return Ok(())
+                        match self.current_tab {
+                            Tab::Services => {
+                                services.process_key_event(&key);
                             }
-                            KeyCode::Left => self.current_tab = Tab::Services,
-                            KeyCode::Right => self.current_tab = Tab::Instances,
-                            _ => {
-                                let mut services =
-                                    self.services.lock().expect("Failed to acquire lock");
-                                let mut instances =
-                                    self.instances.lock().expect("Failed to acquire lock");
-
-                                match self.current_tab {
-                                    Tab::Services => {
-                                        services.process_key_event(&key);
-                                    }
-                                    Tab::Instances => {
-                                        if let Some(selected) = services
-                                            .selected()
-                                            .and_then(|service| instances.get_mut(service))
-                                        {
-                                            selected.process_key_event(&key);
-                                        }
-                                    }
+                            Tab::Instances => {
+                                if let Some(selected) = services
+                                    .selected()
+                                    .and_then(|service| instances.get_mut(service))
+                                {
+                                    selected.process_key_event(&key);
                                 }
                             }
                         }
@@ -277,47 +298,37 @@ impl App {
                 }
             }
         }
+
+        Ok(State::Running)
     }
 
-    fn draw(&mut self, terminal: &mut Terminal<impl Backend>) -> anyhow::Result<()> {
-        terminal.draw(|f| {
-            f.render_widget(self as &mut App, f.size());
-        })?;
-        Ok(())
+    fn run(&mut self, mut terminal: Terminal<impl Backend>) -> anyhow::Result<()> {
+        loop {
+            terminal.draw(|frame| {
+                frame.render_widget(self as &mut App, frame.size());
+            })?;
+
+            if poll(Duration::from_millis(
+                (K_REFRESH_RATE as f64 / 1000.) as u64,
+            ))? {
+                match self.handle_event(event::read()?)? {
+                    State::Exit => {
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 
     fn shutdown(&mut self) -> anyhow::Result<()> {
         self.stop.send(())?;
-        self.mdns
-            .lock()
-            .expect("Failed to acquire the lock")
-            .shutdown()?;
+        if let Some(handle) = self.worker_handle.take() {
+            handle
+                .join()
+                .expect("The worker being joined has panicked")?;
+        }
         Ok(())
-    }
-
-    fn render_block<W: Widget>(
-        &self,
-        title: &str,
-        widget: W,
-        area: Rect,
-        buf: &mut Buffer,
-        selected: bool,
-    ) {
-        let block = Block::new()
-            .borders(Borders::ALL)
-            .border_style(if selected {
-                Style::new().fg(SELECTED_STYLE_FG)
-            } else {
-                Style::default()
-            })
-            .title_alignment(Alignment::Center)
-            .title(title)
-            .title_style(Style::new().bold())
-            .fg(TEXT_COLOR)
-            .bg(HEADER_BG);
-        let inner_area = block.inner(area);
-        block.render(area, buf);
-        widget.render(inner_area, buf);
     }
 }
 
@@ -344,68 +355,24 @@ impl Widget for &mut App {
             Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]);
         let [service_area, instances_area] = list_layout.areas(list_area);
 
-        let services = self.services.lock().expect("Failed to acquire the lock");
-
-        self.render_block(
-            &format!(
-                "Services{}",
-                if let Some(regex) = services.search_regex() {
-                    format!("(/{}/)", regex.to_string())
-                } else {
-                    "".to_string()
-                }
-            ),
-            services.deref(),
-            service_area,
-            buf,
-            if let Tab::Services = self.current_tab {
-                true
-            } else {
-                false
-            },
-        );
+        let services = self.services.lock();
+        services.render(service_area, buf, matches!(self.current_tab, Tab::Services));
         if let Some(selected) = services.selected() {
-            let instances = self.instances.lock().expect("Failed to acquire the lock");
+            let instances = self.instances.lock();
             if let Some(resolved_instances) = instances.get(selected) {
-                self.render_block(
-                    &format!(
-                        "Resolved instances{}",
-                        if let Some(regex) = resolved_instances.search_regex() {
-                            format!("(/{}/)", regex.to_string())
-                        } else {
-                            "".to_string()
-                        }
-                    ),
-                    resolved_instances,
+                resolved_instances.render(
                     instances_area,
                     buf,
-                    if let Tab::Instances = self.current_tab {
-                        true
-                    } else {
-                        false
-                    },
+                    matches!(self.current_tab, Tab::Instances),
                 );
-                if let Some(selected) = resolved_instances.selected() {
-                    self.render_block("Detailed info", selected, info_area, buf, false);
+                if let Some(info) = resolved_instances.selected() {
+                    info.render(info_area, buf, false);
                 }
             }
-        } else {
-            self.render_block(
-                "Resolved instances",
-                Paragraph::default(),
-                instances_area,
-                buf,
-                if let Tab::Instances = self.current_tab {
-                    true
-                } else {
-                    false
-                },
-            );
-            self.render_block("Detailed info", Paragraph::default(), info_area, buf, false);
         }
 
         Paragraph::new(vec![
-            ListWidget::<String>::controls(),
+            Line::from(services.controls()),
             Line::from("←→ to switch panes, C-q to exit."),
         ])
         .centered()
