@@ -1,5 +1,7 @@
 use crate::colors::*;
 use crate::list::ListEntry;
+use crate::widget::DiscoveryWidget;
+use crossterm::event::KeyEvent;
 use mdns_sd::ServiceInfo;
 use ratatui::{prelude::*, widgets::*};
 
@@ -24,20 +26,47 @@ impl ListEntry for Info {
     }
 
     fn id(&self) -> String {
-        self.info.get_fullname().to_string()
+        self.info.get_hostname().to_string()
     }
 }
 
-impl Widget for &Info {
-    fn render(self, area: Rect, buf: &mut Buffer)
-    where
-        Self: Sized,
-    {
-        let block = Block::new()
+impl DiscoveryWidget for &Info {
+    fn title(&self) -> String {
+        self.id()
+    }
+
+    fn controls(&self) -> String {
+        "".to_string()
+    }
+
+    fn process_key_event(&mut self, _key_event: &KeyEvent) {}
+
+    fn render(&self, area: Rect, buf: &mut Buffer, selected: bool) {
+        let outer_block = Block::new()
+            .borders(Borders::ALL)
+            .border_style(if selected {
+                Style::new().fg(SELECTED_STYLE_FG)
+            } else {
+                Style::default()
+            })
+            .title_alignment(Alignment::Center)
+            .title(self.title())
+            .title_style(Style::new().bold())
+            .fg(TEXT_COLOR)
+            .bg(HEADER_BG);
+        let inner_area = outer_block.inner(area);
+        outer_block.render(area, buf);
+
+        let inner_block = Block::new()
             .borders(Borders::NONE)
             .padding(Padding::horizontal(1))
             .bg(NORMAL_ROW_COLOR);
-
+        let properties = textwrap::wrap(
+            &self.info.get_properties().to_string(),
+            // Fit to end, minus "properties" and cell spacing
+            textwrap::Options::new((area.width as usize).saturating_sub(10 + 1)),
+        )
+        .join("\n");
         let rows = [
             Row::new([
                 Cell::new("Hostname").bold().light_cyan(),
@@ -74,18 +103,19 @@ impl Widget for &Info {
             ]),
             Row::new([
                 Cell::new("Properties").bold().light_cyan(),
-                self.info.get_properties().to_string().into(),
-            ]),
+                Cell::new(properties),
+            ])
+            .height(2),
         ];
         let widths = [Constraint::Percentage(10), Constraint::Percentage(90)];
 
         let table = Table::new(rows, widths)
-            .block(block)
+            .block(inner_block)
             .column_spacing(1)
             .highlight_spacing(HighlightSpacing::Always)
             .style(Style::new().white())
             .on_black();
 
-        Widget::render(table, area, buf);
+        Widget::render(table, inner_area, buf);
     }
 }
