@@ -1,6 +1,6 @@
 [package]
 name = "discovery-rs"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "mDNS-SD TUI browser"
 repository = "https://github.com/JustPretender/discovery-rs"
