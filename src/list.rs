@@ -266,7 +266,7 @@ where
         StatefulWidget::render(list, inner_area, buf, &mut self.state.borrow_mut());
 
         if matches!(self.current_mode, Mode::Search) {
-            let search_area = centered_rect(60, 20, area);
+            let search_area = centered_rect(60, (5. / area.height as f64 * 100.) as u16, area);
             Clear.render(search_area, buf);
             self.search.render(search_area, buf, true);
         }
